@@ -8,6 +8,22 @@ Requires **Python 3.12+**. Python 3.12 changed `sum()` to use a compensated summ
 
 ## Run
 
+**Linux / macOS:**
+
+```sh
+./run_lab.sh
+```
+
+**Windows:**
+
+```bat
+run_lab.bat
+```
+
+Both wrappers auto-detect Python 3.12+, run all 58 cases, run unittest, and render `RESULTS.md`.
+
+**Manual:**
+
 ```sh
 python3 run.py              # → results.json, results.csv
 python3 -m unittest test_binary64 -v
@@ -113,7 +129,7 @@ In short: footgun-lab teaches "how to avoid float traps in practice"; binary64-l
 - `results.csv` — summary table
 - `RESULTS.md` — rendered summary, **generated locally, gitignored**
 
-Run `python3 run.py && python3 results_to_md.py` to regenerate `RESULTS.md` from a fresh checkout.
+Run `./run_lab.sh` (Linux/macOS) or `run_lab.bat` (Windows) to regenerate all artifacts from a fresh checkout.
 
 ## License
 
