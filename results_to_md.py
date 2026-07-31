@@ -3,7 +3,15 @@
 import json, sys
 
 with open("results.json") as f:
-    rows = json.load(f)
+    data = json.load(f)
+
+# results.json now has {"runtime": {...}, "cases": [...]}
+if isinstance(data, dict) and "cases" in data:
+    rows = data["cases"]
+    runtime = data.get("runtime", {})
+else:
+    rows = data
+    runtime = {}
 
 ok_count = sum(1 for r in rows if r.get("ok"))
 total = len(rows)
@@ -11,6 +19,12 @@ total = len(rows)
 out = []
 out.append("# RESULTS — python-ieee754-binary64-lab\n")
 out.append(f"**{ok_count}/{total} cases ok**\n")
+
+if runtime:
+    py_ver = runtime.get("python_version", "unknown").split()[0]
+    fi = runtime.get("float_info", {})
+    out.append(f"_Python {py_ver}, float_info.rounds={fi.get('rounds', '?')}, mant_dig={fi.get('mant_dig', '?')}_\n")
+
 out.append("| id | tag | ok | notes |")
 out.append("|---|---|:---:|---|")
 for r in rows:

@@ -1,5 +1,5 @@
 # test_binary64.py — independent unittest coverage
-import unittest, math, struct
+import unittest, math, struct, sys
 from methods.binary64 import float_bits, unpack_binary64, adjacent_floats, signed_zero_info
 
 class TestBinary64(unittest.TestCase):
@@ -78,11 +78,16 @@ class TestBinary64(unittest.TestCase):
         self.assertEqual(round(f, 2), 2.67)
 
     def test_non_assoc(self):
+        # (1e16 + 1.0) + (-1e16)  vs  1e16 + (1.0 + -1e16)
         left = (1e16 + 1.0) + (-1e16)
         right = 1e16 + (1.0 + (-1e16))
-        # at least one ordering loses the 1.0
-        self.assertNotEqual(left, 1.0 if False else None)  # placeholder, just check they differ or one is 0
-        # actual: (1e16+1)-1e16 == 0.0, because 1e16+1 == 1e16
+        # Both orders lose the 1.0 because 1e16 + 1.0 == 1e16 (ulp=2 at 1e16)
+        # So left = (1e16) + (-1e16) = 0.0
+        # right = 1e16 + (-1e16) = 0.0  (since 1.0 + -1e16 == -1e16)
+        self.assertEqual(left, 0.0)
+        self.assertEqual(right, 0.0)
+        # The associativity "failure" is that the 1.0 is lost in both orders,
+        # demonstrating precision loss at large magnitudes
         self.assertEqual((1e16 + 1.0) - 1e16, 0.0)
 
     def test_cancellation(self):
@@ -95,13 +100,23 @@ class TestBinary64(unittest.TestCase):
         self.assertLess(rel_err, 1e-5)
 
     def test_fsum(self):
+        # Python 3.12+ sum() uses a compensated algorithm (Neumaier),
+        # making it much more accurate than pre-3.12 sum().
+        # For the classic [1e16, 1.0, -1e16] case, both sum() and fsum()
+        # now return 1.0 correctly.
+        self.assertGreaterEqual(sys.version_info, (3, 12), "test expects Python 3.12+")
         vals = [1e16, 1.0, -1e16]
         s = sum(vals)
         fs = math.fsum(vals)
-        # fsum is always the correctly-rounded sum
-        # in CPython, sum([1e16, 1.0, -1e16]) == 1.0, fsum also 1.0
+        # fsum is the correctly-rounded exact sum
         self.assertEqual(fs, 1.0)
-        # the key property: fsum is exact to within 0.5 ulp
+        # sum() in 3.12+ matches fsum() for this case
+        self.assertEqual(s, fs)
+        # verify against Decimal exact sum
+        from decimal import Decimal, getcontext
+        getcontext().prec = 50
+        dec_sum = sum(Decimal(str(v)) for v in vals)
+        self.assertEqual(Decimal(fs), dec_sum)
 
     def test_overflow(self):
         big = 1e308 * 10.0
@@ -115,9 +130,18 @@ class TestBinary64(unittest.TestCase):
         with self.assertRaises(ZeroDivisionError):
             _ = 1.0 / 0.0
 
+    def test_frexp_ldexp(self):
+        # math.frexp / math.ldexp round-trip
+        for x in [0.1, 0.5, 1.0, 3.141592653589793, -2.5, 1e-10, 1e10]:
+            mant, exp = math.frexp(x)
+            reconstructed = math.ldexp(mant, exp)
+            self.assertEqual(reconstructed, x)
+            if x != 0.0:
+                self.assertTrue(0.5 <= abs(mant) < 1.0)
+
     def test_results_json_compliance(self):
         """results.json must be standards-compliant JSON (no bare NaN/Inf)"""
-        import json, subprocess, sys, os
+        import json, subprocess, os
         # generate fresh results
         subprocess.run([sys.executable, "run.py"], check=True, cwd=os.path.dirname(__file__), capture_output=True)
         with open(os.path.join(os.path.dirname(__file__), "results.json"), "rb") as f:
@@ -126,7 +150,15 @@ class TestBinary64(unittest.TestCase):
         def reject_constant(x):
             raise ValueError(f"non-compliant constant: {x}")
         parsed = json.loads(data.decode("utf-8"), parse_constant=reject_constant)
-        self.assertIsInstance(parsed, list)
+        self.assertIsInstance(parsed, dict)
+        self.assertIn("runtime", parsed)
+        self.assertIn("cases", parsed)
+        self.assertIsInstance(parsed["cases"], list)
+        # verify runtime metadata includes sys.float_info
+        self.assertIn("float_info", parsed["runtime"])
+        fi = parsed["runtime"]["float_info"]
+        self.assertIn("mant_dig", fi)
+        self.assertEqual(fi["mant_dig"], 53)
         # verify special float values are encoded as strings
         text = data.decode("utf-8")
         # should NOT contain bare : NaN, : Infinity, : -Infinity (unquoted)
@@ -136,6 +168,50 @@ class TestBinary64(unittest.TestCase):
         # but SHOULD contain quoted versions for nan/inf cases
         self.assertIn('"NaN"', text)
         self.assertIn('"Infinity"', text)
+
+    def test_case_validation_enforced(self):
+        """Deliberately reversing an expected result must cause runner to fail."""
+        import subprocess, os, json, tempfile, shutil
+        # copy cases.py to temp, flip one expected result, run, check exit code
+        tmpdir = tempfile.mkdtemp()
+        try:
+            srcdir = os.path.dirname(__file__)
+            for fn in ["cases.py", "run.py", "methods"]:
+                src = os.path.join(srcdir, fn)
+                dst = os.path.join(tmpdir, fn)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+            # patch cases.py: flip round_tie_2_5 expected result
+            cases_path = os.path.join(tmpdir, "cases.py")
+            with open(cases_path, "r") as f:
+                content = f.read()
+            # change round_expected from 2.0 to 3.0 for round_tie_2_5
+            content = content.replace(
+                '"id": "round_tie_2_5", "x": 2.5, "tag": "rounding_ties", "desc": "round(2.5,0)==2 — ties to even", "round_digits": 0, "round_expected": 2.0',
+                '"id": "round_tie_2_5", "x": 2.5, "tag": "rounding_ties", "desc": "round(2.5,0)==2 — ties to even", "round_digits": 0, "round_expected": 3.0'
+            )
+            with open(cases_path, "w") as f:
+                f.write(content)
+            # run
+            proc = subprocess.run(
+                [sys.executable, "run.py"],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+            )
+            # runner must exit nonzero when a case fails validation
+            self.assertNotEqual(proc.returncode, 0, f"runner should fail with wrong expected value, got exit {proc.returncode}, stdout={proc.stdout}, stderr={proc.stderr}")
+            # results.json should show the failure
+            with open(os.path.join(tmpdir, "results.json")) as f:
+                data = json.load(f)
+            cases = data["cases"] if isinstance(data, dict) else data
+            failed = [c for c in cases if not c.get("ok", True)]
+            self.assertTrue(len(failed) >= 1, "at least one case should fail with flipped expectation")
+            self.assertTrue(any(c["id"] == "round_tie_2_5" for c in failed))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 if __name__ == "__main__":
     unittest.main()
